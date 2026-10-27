@@ -26,6 +26,8 @@ FOCUSED_TESTS = (
     "com.hermesandroid.relay.network.upstream.SessionMessagePaginationTest",
     "com.hermesandroid.relay.network.upstream.GatewayPayloadMemoryTest",
     "com.hermesandroid.relay.viewmodel.ChatMemoryRecoveryTest",
+    "com.hermesandroid.relay.viewmodel.GatewaySlashCommandRunnerTest",
+    "com.hermesandroid.relay.viewmodel.GatewayCommandDisplayTest",
     "com.hermesandroid.relay.reliability.ReliabilityReportTest",
     "com.hermesandroid.relay.data.ChatUnreadStoreTest",
     "com.hermesandroid.relay.data.ChatTurnCheckpointStoreTest",
