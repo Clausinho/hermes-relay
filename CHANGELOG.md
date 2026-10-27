@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Fixed
+
+- Android starts goals and skill prompts returned by successful Gateway commands instead of displaying an empty result.
+
 ## [Android 1.19.0] - 2026-10-20
 
 ### Added
