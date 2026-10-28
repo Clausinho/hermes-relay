@@ -7527,86 +7527,32 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    /**
-     * Upstream dispatch order: `slash.exec` first; error 4018 (pending-input
-     * / skill / blocked command) falls through to `command.dispatch`, whose
-     * result union routes per type — exec/plugin/skill output becomes a
-     * system notice, `send` re-enters the normal send path (notice first),
-     * `prefill` lands in the composer, `alias` re-dispatches its target.
-     */
+    /** Both successful slash execution and legacy dispatch can return prompt directives. */
     private suspend fun runServerSlashCommand(
         gateway: GatewayChatClient,
         handler: ChatHandler,
         commandLine: String,
         depth: Int,
     ) {
-        if (depth > 2) {
-            handler.addSystemNotice("Command alias loop detected: $commandLine")
-            return
-        }
-        val name = commandLine.removePrefix("/").substringBefore(' ')
-
-        val exec = gateway.slashExec(commandLine)
-        exec.onSuccess { result ->
-            val output = result.stringValue("output") ?: "(no output)"
-            val warning = result.stringValue("warning")
-            handler.addSystemNotice(listOfNotNull(output, warning).joinToString("\n\n"))
-            return
-        }
-        val failure = exec.exceptionOrNull()
-        val code = (failure as? GatewayRpcException)?.code
-        // 4018 = "use command.dispatch"; "no live session" happens before
-        // the first gateway turn — command.dispatch works sessionless for
-        // quick/plugin commands, so fall through for that too.
-        val fallThrough = code == 4018 ||
-            failure?.message?.contains("no live session", ignoreCase = true) == true
-        if (!fallThrough) {
-            handler.addSystemNotice("/$name failed: ${failure?.message ?: "unknown error"}")
-            return
-        }
-
-        val arg = commandLine.substringAfter(' ', "").trim().takeIf { it.isNotBlank() }
-        gateway.commandDispatch(name, arg).fold(
-            onSuccess = { result ->
-                when (result.stringValue("type")) {
-                    "exec", "plugin" ->
-                        handler.addSystemNotice(result.stringValue("output") ?: "(no output)")
-                    "skill" ->
-                        handler.addSystemNotice(safeGatewayCommandDisplay(result, commandLine))
-                    "alias" -> {
-                        val target = result.stringValue("target")
-                        if (target != null) {
-                            val line = if (target.startsWith("/")) target else "/$target"
-                            runServerSlashCommand(gateway, handler, line, depth + 1)
-                        }
-                    }
-                    "send" -> {
-                        result.stringValue("notice")?.let { handler.addSystemNotice(it) }
-                        result.stringValue("message")?.let { expandedMessage ->
-                            // The corrected gateway supplies a bounded literal
-                            // display alongside the expanded skill/send body.
-                            // Execute the expansion but keep it out of local UI,
-                            // checkpoints, titles, diagnostics, and retry text.
-                            sendMessageInternal(
-                                client = apiClient,
-                                handler = handler,
-                                text = safeGatewayCommandDisplay(result, commandLine),
-                                transportText = expandedMessage,
-                            )
-                        }
-                    }
-                    "prefill" -> {
-                        result.stringValue("notice")?.let { handler.addSystemNotice(it) }
-                        result.stringValue("message")?.let { _composerPrefill.trySend(it) }
-                    }
-                    else ->
-                        handler.addSystemNotice(result.stringValue("output") ?: "Command completed.")
-                }
+        GatewaySlashCommandRunner(
+            slashExec = gateway::slashExec,
+            commandDispatch = gateway::commandDispatch,
+            canDispatch = { failure ->
+                // Only the legacy pending-input refusal or a cold session uses dispatch.
+                (failure as? GatewayRpcException)?.code == 4018 ||
+                    failure?.message?.contains("no live session", ignoreCase = true) == true
             },
-            onFailure = { e ->
-                handler.addSystemNotice("/$name failed: ${e.message ?: "unknown error"}")
+            showNotice = handler::addSystemNotice,
+            submitPrompt = { display, message ->
+                sendMessageInternal(
+                    client = apiClient,
+                    handler = handler,
+                    text = display,
+                    transportText = message,
+                )
             },
-        )
+            prefill = { _composerPrefill.trySend(it) },
+        ).run(commandLine, depth)
     }
 
     // === Turn-complete notification ===
@@ -12414,21 +12360,10 @@ private fun summarizeToolPreviewObject(obj: JsonObject): String? {
     return if (keys.isBlank()) null else "Structured result: $keys"
 }
 
-internal fun safeGatewayCommandDisplay(result: JsonObject, literalInvocation: String): String {
-    val literal = literalInvocation.trim().ifBlank { "Command completed." }
-    return (result["display"] as? JsonPrimitive)
-        ?.contentOrNull
-        ?.trim()
-        ?.takeIf { it.isNotBlank() }
-        ?.take(MAX_GATEWAY_COMMAND_DISPLAY_CHARS)
-        ?: literal.take(MAX_GATEWAY_COMMAND_DISPLAY_CHARS)
-}
-
 private fun JsonObject.stringValue(key: String): String? =
     (this[key] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotBlank() }
 
 private const val RECENT_PROMPTS_LIMIT = 15
-private const val MAX_GATEWAY_COMMAND_DISPLAY_CHARS = 2_000
 internal fun normalizeReasoningEffort(value: String?): String = ReasoningEfforts.normalize(value)
 
 internal fun isCurrentReasoningResponse(
